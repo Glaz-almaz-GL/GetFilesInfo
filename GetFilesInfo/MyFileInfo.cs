@@ -6,13 +6,26 @@ using System.Threading.Tasks;
 
 namespace GetFilesInfo
 {
+    public enum Sorts
+    {
+        FilePath,
+        NameAsc,
+        NameDesc,
+        PagesAsc,
+        PagesDesc,
+        HashAsc,
+        HashDesc,
+        FileExtensionAsc,
+        FileExtensionDesc,
+    }
+
     public class MyFileInfo
     {
         public string FilePath { get; set; }
         public string FileName { get; set; }
         public string FileExtension { get; set; }
         public int? PageCount { get; set; }
-        public string FileCRC { get; set; }
+        public string FileHash { get; set; }
     }
 
     public class MyFolderInfo

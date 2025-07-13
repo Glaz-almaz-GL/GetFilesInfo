@@ -1,87 +1,82 @@
-﻿using System;
+﻿using Newtonsoft.Json.Linq;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Security.Policy;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace GetFilesInfo
 {
-    public class CheckForUpdates
+    public class CheckForUpdates(string currentVersion, string githubToken)
     {
-        public string VersionUrl { get; private set; }
-        public string CurrentVersion { get; private set; }
+        public string CurrentVersion { get; private set; } = currentVersion;
+        public string GithubToken { get; private set; } = githubToken;
 
-        public CheckForUpdates(string versionUrl, string currentVersion)
-        {
-            VersionUrl = versionUrl;
-            CurrentVersion = currentVersion;
-        }
+        public const string owner = "Glaz-almaz-GL";
+        public const string repo = "GetFilesInfo";
 
-        public void Start()
+        public async Task Start()
         {
+            string appDirectory = AppDomain.CurrentDomain.BaseDirectory;
+            string tempFolderPath = Path.Combine(appDirectory, "temp");
+
             try
             {
-                // Определяем путь к папке temp внутри директории приложения
-                string appDirectory = AppDomain.CurrentDomain.BaseDirectory;
-                string tempFolderPath = Path.Combine(appDirectory, "temp");
-                Directory.CreateDirectory(tempFolderPath); // Создаём папку temp, если её нет
+                var latestRelease = await GetLatestRelease(owner, repo, GithubToken);
 
-                // Скачиваем содержимое version.txt в временный файл
-                string tempFilePath = Path.Combine(tempFolderPath, "version.txt"); // Используем папку temp
-                using (WebClient client = new WebClient())
+                if (latestRelease == null)
+                    return;
+
+                string latestVersion = latestRelease["tag_name"].ToString().Replace("v", "");
+
+                var assets = latestRelease["assets"] as JArray;
+                string downloadUrl;
+
+                if (assets.Count > 0)
                 {
-                    client.DownloadFile(VersionUrl, tempFilePath);
+                    var firstAsset = assets[0];
+                    downloadUrl = firstAsset["browser_download_url"]?.ToString();
+                }
+                else
+                {
+                    MessageBox.Show("В релизе нет файлов.", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
                 }
 
-                // Читаем файл с помощью StreamReader
-                string latestVersion = null;
-                string downloadUrl = null;
-                using (StreamReader reader = new StreamReader(tempFilePath))
-                {
-                    string line;
-                    while ((line = reader.ReadLine()) != null)
-                    {
-                        line = line.Trim(); // Удаляем лишние пробелы
-                        if (line.StartsWith("version=", StringComparison.OrdinalIgnoreCase))
-                        {
-                            latestVersion = line.Substring("version=".Length).Trim();
-                        }
-                        else if (line.StartsWith("downloadUrl=", StringComparison.OrdinalIgnoreCase))
-                        {
-                            downloadUrl = line.Substring("downloadUrl=".Length).Trim();
-                        }
-                    }
-                }
+                Directory.CreateDirectory(tempFolderPath);
 
-                // Проверяем, что оба значения были найдены
                 if (string.IsNullOrEmpty(latestVersion) || string.IsNullOrEmpty(downloadUrl))
                 {
                     MessageBox.Show("Неверный формат version.txt: отсутствует version или downloadUrl.", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
                 }
 
-                // Проверка URL
                 if (!Uri.IsWellFormedUriString(downloadUrl, UriKind.Absolute))
                 {
                     MessageBox.Show("Неверный формат downloadUrl: URL недействителен.", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
                 }
 
-                // Сравниваем версии
                 if (IsNewerVersion(latestVersion))
                 {
                     string message = $"Доступна новая версия: {latestVersion}\nТекущая версия: {CurrentVersion}\nЖелаете обновить программу?";
                     DialogResult result = MessageBox.Show(message, "Доступно обновление", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                     if (result == DialogResult.Yes)
                     {
-                        StartUpdateProcess(downloadUrl, tempFolderPath); // Передаём путь к папке temp
+                        await StartUpdateProcess(downloadUrl, tempFolderPath);
                     }
                 }
-
-                // Удаляем временный файл после использования
-                File.Delete(tempFilePath);
+                else
+                {
+                    MessageBox.Show($"Уже установлена последняя версия: {CurrentVersion}", "Обновление не требуется", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
             }
             catch (Exception ex)
             {
@@ -89,36 +84,88 @@ namespace GetFilesInfo
             }
         }
 
-        private void StartUpdateProcess(string downloadUrl, string tempFolderPath)
+        public static async Task<JObject> GetLatestRelease(string owner, string repo, string GithubToken)
+        {
+            var client = new HttpClient();
+
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("C# App");
+            client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", GithubToken);
+            client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
+
+            string url = $"https://api.github.com/repos/{owner}/{repo}/releases/latest";
+
+            try
+            {
+                HttpResponseMessage response = await client.GetAsync(url);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    string responseBody = await response.Content.ReadAsStringAsync();
+                    JObject release = JObject.Parse(responseBody);
+
+                    string htmlUrl = release["html_url"]?.ToString();
+
+                    if (!string.IsNullOrEmpty(htmlUrl))
+                    {
+                        return release;
+                    }
+                    else
+                    {
+                        UpdateUI("Не удалось извлечь 'html_url' из ответа.");
+                    }
+                }
+                else
+                {
+                    UpdateUI($"Ошибка при запросе новейшей версии: {(int)response.StatusCode} - {response.ReasonPhrase}");
+                }
+            }
+            catch (Exception ex)
+            {
+                UpdateUI($"Исключение: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        private static async Task StartUpdateProcess(string downloadUrl, string tempFolderPath)
         {
             try
             {
-                // Определяем путь к ZIP-файлу внутри папки temp
                 string tempZipPath = Path.Combine(tempFolderPath, "update.zip");
 
-                // Скачиваем ZIP-архив
-                using (WebClient client = new WebClient())
+                using (HttpClient client = new HttpClient())
                 {
-                    Console.WriteLine("Url: " + downloadUrl + " Path: " + tempZipPath);
-                    client.DownloadFile(downloadUrl, tempZipPath);
+                    try
+                    {
+                        using var response = await client.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead);
+                        response.EnsureSuccessStatusCode();
+
+                        await using var stream = await response.Content.ReadAsStreamAsync();
+                        await using var fileStream = new FileStream(tempZipPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true);
+
+                        await stream.CopyToAsync(fileStream);
+                    }
+                    catch (HttpRequestException e)
+                    {
+                        UpdateUI($"Ошибка HTTP: {e.Message}");
+                    }
+                    catch (Exception e)
+                    {
+                        UpdateUI($"Общая ошибка: {e.Message}");
+                    }
                 }
 
-                // Определяем путь к updater.exe
                 string updaterPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "updater.exe");
 
-                Console.WriteLine(tempZipPath);
-
-                // Запускаем updater и передаём путь к ZIP-файлу
                 ProcessStartInfo startInfo = new ProcessStartInfo
                 {
                     FileName = updaterPath,
                     Arguments = $"\"{@tempZipPath}\"",
                     UseShellExecute = true,
-                    Verb = "runas" // Запуск с правами администратора
+                    Verb = "runas"
                 };
                 Process.Start(startInfo);
-
-                // Завершаем работу основного приложения
                 Application.Exit();
             }
             catch (Exception ex)
@@ -126,7 +173,6 @@ namespace GetFilesInfo
                 MessageBox.Show($"Ошибка при начале обновления: {ex.Message}\n\n {ex.StackTrace}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
-
 
         private bool IsNewerVersion(string latestVersion)
         {
@@ -139,6 +185,12 @@ namespace GetFilesInfo
             }
 
             return false;
+        }
+
+        private static void UpdateUI(string msg, string msgName = "")
+        {
+            Debug.WriteLine($"[{DateTime.Now}] {msg}");
+            MessageBox.Show(msg, msgName);
         }
     }
 }

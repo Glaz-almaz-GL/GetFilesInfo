@@ -3,10 +3,13 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.IO.Hashing;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -15,24 +18,41 @@ namespace GetFilesInfo
 {
     public partial class frmMain : Form
     {
-        private string CurrentVersion = "1.1.0";
-        private string VersionUrl = "https://raw.githubusercontent.com/Glaz-almaz-GL/Get-Files-Info/refs/heads/main/version.txt";
-        private bool ShouldNumerable;
+        private readonly CheckForUpdates checkForUpdates = new CheckForUpdates(CurrentVersion, "YOUR-GiTHUB-APIKEY");
+        private const string CurrentVersion = "1.2.0";
+
+        private readonly List<MyFolderInfo> Folders = [];
+        private readonly Dictionary<Sorts, (Func<MyFileInfo, object> selector, bool ascending)> _sortStrategies = new()
+{
+    { Sorts.FilePath,            (f => f.FilePath, true) },
+    { Sorts.NameAsc,             (f => f.FileName, true) },
+    { Sorts.NameDesc,            (f => f.FileName, false) },
+    { Sorts.PagesAsc,            (f => f.PageCount ?? 0, true) },
+    { Sorts.PagesDesc,           (f => f.PageCount ?? 0, false) },
+    { Sorts.HashAsc,              (f => f.FileHash, true) },
+    { Sorts.HashDesc,             (f => f.FileHash, false) },
+    { Sorts.FileExtensionAsc,    (f => f.FileExtension, true) },
+    { Sorts.FileExtensionDesc,   (f => f.FileExtension, false) }
+};
 
         private static string FolderMessage(string Folder)
         {
-            return $"\n\n[------------------------------------------------------------ Выбранная папка: {Folder}; Длина CRC = 64  ------------------------------------------------------------]\n\n";
+            return $"\n\n[------------------------------------------------------------ Выбранная папка: \"{Folder}\"; SHA-256 Хэш  ------------------------------------------------------------]\n\n";
         }
-
-        List<MyFolderInfo> Folders = new List<MyFolderInfo>();
-        int Id = 0;
 
         public frmMain()
         {
-            CheckForUpdates checkForUpdates = new CheckForUpdates(VersionUrl, CurrentVersion);
-            checkForUpdates.Start();
-
             InitializeComponent();
+
+            btSortByFilePath.Tag = Sorts.FilePath;
+            btSortByNameAsc.Tag = Sorts.NameAsc;
+            btSortByNameDesc.Tag = Sorts.NameDesc;
+            btSortByPagesAsc.Tag = Sorts.PagesAsc;
+            btSortByPagesDesc.Tag = Sorts.PagesDesc;
+            btSortByHashAsc.Tag = Sorts.HashAsc;
+            btSortByHashDesc.Tag = Sorts.HashDesc;
+            btSortByExtensionAsc.Tag = Sorts.FileExtensionAsc;
+            btSortByExtensionDesc.Tag = Sorts.FileExtensionDesc;
         }
 
         private void SelectFolder()
@@ -50,7 +70,9 @@ namespace GetFilesInfo
 
         private void btView_Click(object sender, EventArgs e)
         {
+            EnableUI(false);
             SelectFolder();
+            EnableUI(true);
         }
 
         private void EnableUI(bool enable)
@@ -58,8 +80,8 @@ namespace GetFilesInfo
             txtPath.Enabled = enable;
             btView.Enabled = enable;
             chbShouldNumerable.Enabled = enable;
-            btSortByCRCAsc.Enabled = enable;
-            btSortByCRCDesc.Enabled = enable;
+            btSortByHashAsc.Enabled = enable;
+            btSortByHashDesc.Enabled = enable;
             btSortByExtensionAsc.Enabled = enable;
             btSortByExtensionDesc.Enabled = enable;
             btSortByFilePath.Enabled = enable;
@@ -68,57 +90,67 @@ namespace GetFilesInfo
             btSortByPagesAsc.Enabled = enable;
             btSortByPagesDesc.Enabled = enable;
             btStart.Enabled = enable;
+            btExport.Enabled = enable;
         }
 
         private async void btStart_Click(object sender, EventArgs e)
         {
             EnableUI(false);
 
-            string FolderPath = txtPath.Text;
-
-            await Task.Run(() => UpdateUI($"\n\n[------------------------------------------------------------ Выбранная папка: {FolderPath} ------------------------------------------------------------]\n\n"));
-
-            if (!string.IsNullOrEmpty(FolderPath))
+            for (int i = 0; i < 3; i++)
             {
-                await ProcessFilesAsync(FolderPath);
-            }
-            else
-            {
-                MessageBox.Show("Путь некорректный или пустой", "Ошибка");
+                string FolderPath = txtPath.Text;
+
+                if (!string.IsNullOrEmpty(FolderPath) && Directory.Exists(FolderPath))
+                {
+                    await Task.Run(() => UpdateUI(FolderMessage(FolderPath)));
+                    await ProcessFilesAsync(FolderPath);
+                    txtPath.Text = FolderPath;
+                    break;
+                }
+                else if (string.IsNullOrEmpty(FolderPath))
+                {
+                    SelectFolder();
+                }
+                else if (!Directory.Exists(FolderPath))
+                {
+                    MessageBox.Show("Указанная директория не существует", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
 
             EnableUI(true);
         }
 
+        int Id;
         private async Task ProcessFilesAsync(string folderPath)
         {
             List<MyFileInfo> fileList = new List<MyFileInfo>();
             int symbolsCount = folderPath.Length;
 
-            foreach (var file in Directory.GetFiles(folderPath, "*.*", SearchOption.AllDirectories))
+            foreach (var file in Directory.GetFiles(folderPath, "*", SearchOption.AllDirectories))
             {
                 try
                 {
                     string fileName = Path.GetFileName(file);
-                    string fileCRC = "";
+                    string fileHash = "";
                     string fileExtension = Path.GetExtension(file);
 
                     int? pdfPageCount = null;
 
-                    using (FileStream fileStream = File.OpenRead(file))
+                    using (SHA256 sha256 = SHA256.Create())
                     {
-                        var crc64 = new Crc64();
-                        await crc64.AppendAsync(fileStream);
+                        using (FileStream fileStream = File.OpenRead(file))
+                        {
+                            byte[] hashBytes = await sha256.ComputeHashAsync(fileStream);
 
-                        fileCRC = BitConverter.ToString(crc64.GetCurrentHash());
+                            fileHash = BitConverter.ToString(hashBytes).Replace("-", "").ToLower();
+                        }
                     }
 
                     if (fileExtension.Equals(".pdf", StringComparison.OrdinalIgnoreCase))
                     {
-                        using (PdfDocument pdf = PdfDocument.Load(file))
-                        {
-                            pdfPageCount = pdf.PageCount;
-                        }
+                        using PdfDocument pdf = PdfDocument.Load(file);
+                        pdfPageCount = pdf.PageCount;
                     }
 
                     string filePath = Path.GetDirectoryName(file).Remove(0, symbolsCount);
@@ -129,7 +161,7 @@ namespace GetFilesInfo
                         FileName = fileName,
                         FileExtension = fileExtension,
                         PageCount = pdfPageCount,
-                        FileCRC = fileCRC
+                        FileHash = fileHash
                     });
                 }
                 catch (Exception ex) { MessageBox.Show(ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error); }
@@ -144,33 +176,7 @@ namespace GetFilesInfo
 
             Id++;
 
-            // Обновляем UI на основе текущего списка
             UpdateUIFromList(fileList);
-        }
-
-        private void UpdateUIFromList(List<MyFileInfo> fileList)
-        {
-            int fileNum = 1;
-
-            foreach (var fileInfo in fileList)
-            {
-                string fileNumInfo = "";
-                string pageCountInfo = fileInfo.PageCount.HasValue ? $"Страниц: {fileInfo.PageCount};" : "";
-
-                if (ShouldNumerable)
-                {
-                    fileNumInfo = $"{fileNum}. ";
-                }
-
-                string message = $"{fileNumInfo}Путь к файлу: {fileInfo.FilePath}; Имя файла: {fileInfo.FileName}; {pageCountInfo} Значение CRC: {fileInfo.FileCRC};\n";
-
-                if (ShouldNumerable)
-                {
-                    fileNum++;
-                }
-
-                UpdateUI(message);
-            }
         }
 
         private void UpdateUI(string message)
@@ -182,139 +188,111 @@ namespace GetFilesInfo
             else
             {
                 txtLog.AppendText(message);
-                Console.WriteLine(message);
+                Debug.WriteLine(message);
 
                 txtLog.SelectionStart = txtLog.TextLength;
                 txtLog.ScrollToCaret();
             }
         }
 
+        #region Sort
+        private void SortButton_Click(object sender, EventArgs e)
+        {
+            if (sender is Button button && button.Tag is Sorts sortType)
+            {
+                SortBy(sortType);
+            }
+        }
+
+        private void SortBy(Sorts sortBy)
+        {
+            if (Folders.Count == 0)
+                return;
+
+            txtLog.Clear();
+
+            if (!_sortStrategies.TryGetValue(sortBy, out var strategy))
+            {
+                MessageBox.Show("Неизвестный тип сортировки", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            foreach (var folder in Folders)
+            {
+                UpdateUI(FolderMessage(folder.FolderPath));
+                SortAndDisplay(folder.FolderFiles, strategy.selector, strategy.ascending);
+            }
+        }
+
         private void SortAndDisplay(List<MyFileInfo> fileList, Func<MyFileInfo, object> keySelector, bool ascending = true)
         {
-            var sortedList = ascending ? fileList.OrderBy(keySelector).ToList() : fileList.OrderByDescending(keySelector).ToList();
+            var sortedList = ascending
+                ? fileList.OrderBy(keySelector).ToList()
+                : fileList.OrderByDescending(keySelector).ToList();
+
             UpdateUIFromList(sortedList);
         }
 
-        private void btSortByFilePath_Click(object sender, EventArgs e)
+        private void UpdateUIFromList(List<MyFileInfo> fileList)
         {
-            if (Folders.Count > 0)
+            bool shouldNumerable = chbShouldNumerable.Checked;
+            int fileNum = 1;
+
+            foreach (var fileInfo in fileList)
             {
-                txtLog.Clear(); // Очищаем текущий текст
-                foreach (var Folder in Folders)
+                string fileNumInfo = "";
+                string pageCountInfo = fileInfo.PageCount.HasValue ? $"Страниц: {fileInfo.PageCount};" : "";
+
+                if (shouldNumerable)
                 {
-                    UpdateUI(FolderMessage(Folder.FolderPath));
-                    SortAndDisplay(Folder.FolderFiles, f => f.FilePath);
+                    fileNumInfo = $"{fileNum}. ";
                 }
+
+                string message = $"{fileNumInfo}Путь к файлу: {fileInfo.FilePath};     Имя файла: {fileInfo.FileName};     {pageCountInfo}     Хэш файла: {fileInfo.FileHash};\n";
+
+                if (shouldNumerable)
+                {
+                    fileNum++;
+                }
+
+                UpdateUI(message);
             }
         }
+        #endregion
 
-        private void btSortByNameAsc_Click(object sender, EventArgs e)
+        private async void tsmCheckForUpdates_Click(object sender, EventArgs e)
         {
-            if (Folders.Count > 0)
-            {
-                txtLog.Clear(); // Очищаем текущий текст
-                foreach (var Folder in Folders)
-                {
-                    UpdateUI(FolderMessage(Folder.FolderPath));
-                    SortAndDisplay(Folder.FolderFiles, f => f.FileName);
-                }
-            }
+            EnableUI(false);
+            await checkForUpdates.Start();
+            EnableUI(true);
         }
 
-        private void btSortByNameDesc_Click(object sender, EventArgs e)
+        private void tsmAboutInfo_Click(object sender, EventArgs e)
         {
-            if (Folders.Count > 0)
-            {
-                txtLog.Clear(); // Очищаем текущий текст
-                foreach (var Folder in Folders)
-                {
-                    UpdateUI(FolderMessage(Folder.FolderPath));
-                    SortAndDisplay(Folder.FolderFiles, f => f.FileName, false);
-                }
-            }
+            string aboutProgrammInfoMsg = $"О программе:\r\n\r\nНазвание программы: {Process.GetCurrentProcess().ProcessName}\r\nВерсия: {CurrentVersion}\r\nЯзык программирования: c#\r\nПлатформа: Windows ({RuntimeInformation.FrameworkDescription})\r\nТип приложения: WinForms\r\nПрограмма предназначена для облегчения работы с экспертизами за счёт отображения информации о файлах внутри указанной директории.";
+            string aboutAuthorInfoMsg = "\r\n\r\nО разработчике:\r\n\r\nИмя: Глазов Михаил\r\nEmail: glazalmazgl@gmail.com\r\nGitHub: https://github.com/Glaz-almaz-GL";
+            MessageBox.Show(aboutProgrammInfoMsg + aboutAuthorInfoMsg, "Информация", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        private void btSortByPagesAsc_Click(object sender, EventArgs e)
+        private void btExport_Click(object sender, EventArgs e)
         {
-            if (Folders.Count > 0)
+            if (string.IsNullOrEmpty(txtLog.Text))
             {
-                txtLog.Clear(); // Очищаем текущий текст
-                foreach (var Folder in Folders)
+                MessageBox.Show("Вывод пустой", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            using (SaveFileDialog folderBrowserDialog = new SaveFileDialog())
+            {
+                folderBrowserDialog.FileName = "GetFilesInfo Output.txt";
+                folderBrowserDialog.Filter = "Text File |*.txt";
+                DialogResult result = folderBrowserDialog.ShowDialog();
+
+                if (result == DialogResult.OK && !string.IsNullOrWhiteSpace(folderBrowserDialog.FileName))
                 {
-                    UpdateUI(FolderMessage(Folder.FolderPath));
-                    SortAndDisplay(Folder.FolderFiles, f => f.PageCount ?? 0);
+                    File.WriteAllText(folderBrowserDialog.FileName, txtLog.Text);
                 }
             }
-        }
-
-        private void btSortByPagesDesc_Click(object sender, EventArgs e)
-        {
-            if (Folders.Count > 0)
-            {
-                txtLog.Clear(); // Очищаем текущий текст
-                foreach (var Folder in Folders)
-                {
-                    UpdateUI(FolderMessage(Folder.FolderPath));
-                    SortAndDisplay(Folder.FolderFiles, f => f.PageCount ?? 0, false);
-                }
-            }
-        }
-
-        private void btSortByCRCAsc_Click(object sender, EventArgs e)
-        {
-            if (Folders.Count > 0)
-            {
-                txtLog.Clear(); // Очищаем текущий текст
-                foreach (var Folder in Folders)
-                {
-                    UpdateUI(FolderMessage(Folder.FolderPath));
-                    SortAndDisplay(Folder.FolderFiles, f => f.FileCRC);
-                }
-            }
-        }
-
-        private void btSortByCRCDesc_Click(object sender, EventArgs e)
-        {
-            if (Folders.Count > 0)
-            {
-                txtLog.Clear(); // Очищаем текущий текст
-                foreach (var Folder in Folders)
-                {
-                    UpdateUI(FolderMessage(Folder.FolderPath));
-                    SortAndDisplay(Folder.FolderFiles, f => f.FileCRC);
-                }
-            }
-        }
-
-        private void btSortByExtensionAsc_Click(object sender, EventArgs e)
-        {
-            if (Folders.Count > 0)
-            {
-                txtLog.Clear(); // Очищаем текущий текст
-                foreach (var Folder in Folders)
-                {
-                    UpdateUI(FolderMessage(Folder.FolderPath));
-                    SortAndDisplay(Folder.FolderFiles, f => f.FileExtension);
-                }
-            }
-        }
-
-        private void btSortByExtensionDesc_Click(object sender, EventArgs e)
-        {
-            if (Folders.Count > 0)
-            {
-                txtLog.Clear(); // Очищаем текущий текст
-                foreach (var Folder in Folders)
-                {
-                    UpdateUI(FolderMessage(Folder.FolderPath));
-                    SortAndDisplay(Folder.FolderFiles, f => f.FileExtension, false);
-                }
-            }
-        }
-
-        private void chbShouldNumerable_CheckedChanged(object sender, EventArgs e)
-        {
-            ShouldNumerable = chbShouldNumerable.Checked;
         }
     }
 }
